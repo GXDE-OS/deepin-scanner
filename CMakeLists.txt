@@ -27,7 +27,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/cmake)
 include(translation-generate)
 
 # 查找Qt版本
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core)
+find_package(QT NAMES Qt5 REQUIRED COMPONENTS Core)
 message(">>> Found Qt version: ${QT_VERSION_MAJOR}")
 set(QT_DESIRED_VERSION ${QT_VERSION_MAJOR})
 
