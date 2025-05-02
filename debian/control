@@ -19,6 +19,7 @@ Build-Depends:
  libjpeg-dev,
  libicu-dev,
  libpng-dev,
+ cmake,
 Standards-Version: 4.5.0
 
 Package: deepin-scanner
