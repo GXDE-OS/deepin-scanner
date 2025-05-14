@@ -9,7 +9,6 @@
 #include <QVBoxLayout>
 #include <QGroupBox>
 #include <QComboBox>
-#include <QGraphicsDropShadowEffect>
 #include <QDebug>
 #include <QStandardPaths>
 #include <QDir>
@@ -31,14 +30,9 @@ static const int SETTING_COMBO_WIDTH = 220;
 
 ScanWidget::ScanWidget(QWidget *parent) : QWidget(parent),
                                           m_isScanner(false),
-                                          m_previewTimer(this),
                                           m_imageSettings(new ImageSettings())
 {
     setupUI();
-
-    // 设置预览更新定时器
-    m_previewTimer.setInterval(100);   // 10 FPS
-    connect(&m_previewTimer, &QTimer::timeout, this, &ScanWidget::updatePreview);
 }
 
 ScanWidget::~ScanWidget()
@@ -48,24 +42,20 @@ ScanWidget::~ScanWidget()
 
 void ScanWidget::setupUI()
 {
-    QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
+    DFrame *mainFrame = new DFrame();
+    QHBoxLayout *mainLayout = new QHBoxLayout(mainFrame);
 
     // Preview area
     DFrame *previewArea = new DFrame();
     previewArea->setMinimumSize(480, 360);
     QVBoxLayout *previewLayout = new QVBoxLayout(previewArea);
-    QGraphicsDropShadowEffect *shadow = new QGraphicsDropShadowEffect(previewArea);
-    shadow->setBlurRadius(10);
-    shadow->setOffset(2, 2);
-    previewArea->setGraphicsEffect(shadow);
-    previewArea->setBackgroundRole(QPalette::Window);
 
     m_previewLabel = new DLabel();
     m_previewLabel->setAlignment(Qt::AlignCenter);
     m_previewLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     previewLayout->addWidget(m_previewLabel);
 
-    splitter->addWidget(previewArea);
+    mainLayout->addWidget(previewArea, 9);
 
     // Settings area
     QWidget *settingsArea = new QWidget();
@@ -91,8 +81,6 @@ void ScanWidget::setupUI()
     m_modeLabel->setFixedWidth(SETTING_LABEL_WIDTH);
     m_modeCombo = new QComboBox();
     m_modeCombo->setMaximumWidth(SETTING_COMBO_WIDTH);
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &ScanWidget::onScanModeChanged);
     QHBoxLayout *modeLayout = new QHBoxLayout();
     modeLayout->setSpacing(20);
     modeLayout->addWidget(m_modeLabel);
@@ -104,8 +92,6 @@ void ScanWidget::setupUI()
     resLabel->setFixedWidth(SETTING_LABEL_WIDTH);
     m_resolutionCombo = new QComboBox();
     m_resolutionCombo->setMaximumWidth(SETTING_COMBO_WIDTH);
-    connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &ScanWidget::onResolutionChanged);
     QHBoxLayout *resolutionLayout = new QHBoxLayout();
     resolutionLayout->setSpacing(20);
     resolutionLayout->addWidget(resLabel);
@@ -117,8 +103,6 @@ void ScanWidget::setupUI()
     colorLabel->setFixedWidth(SETTING_LABEL_WIDTH);
     m_colorCombo = new QComboBox();
     m_colorCombo->setMaximumWidth(SETTING_COMBO_WIDTH);
-    connect(m_colorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &ScanWidget::onColorModeChanged);
     QHBoxLayout *colorLayout = new QHBoxLayout();
     colorLayout->setSpacing(20);
     colorLayout->addWidget(colorLabel);
@@ -130,8 +114,6 @@ void ScanWidget::setupUI()
     formatLabel->setFixedWidth(SETTING_LABEL_WIDTH);
     m_formatCombo = new QComboBox();
     m_formatCombo->setMaximumWidth(SETTING_COMBO_WIDTH);
-    connect(m_formatCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &ScanWidget::onFormatChanged);
     QHBoxLayout *formatLayout = new QHBoxLayout();
     formatLayout->setSpacing(20);
     formatLayout->addWidget(formatLabel);
@@ -168,24 +150,31 @@ void ScanWidget::setupUI()
     m_historyEdit = new QPlainTextEdit();
     m_historyEdit->setReadOnly(true);
     m_historyEdit->setPlaceholderText(tr("Scan history will be shown here"));
+    m_historyEdit->hide();
 
     settingsLayout->addSpacing(20);
     settingsLayout->addWidget(m_historyEdit);
+    settingsLayout->setAlignment(Qt::AlignTop);
 
-    connect(scanButton, &DPushButton::clicked, this, &ScanWidget::startScanning);
+    connect(scanButton, &DPushButton::clicked, this, [this]() {
+        // Throttle rapid clicks to avoid duplicate scanning
+        static QTimer throttle;
+        if(throttle.isActive()) return;
+
+        throttle.setSingleShot(true);
+        throttle.start(500); // set 500ms delay for single click
+
+        startScanning();
+    });
     connect(viewButton, &DPushButton::clicked, this, [this]() {
         QDesktopServices::openUrl(QUrl::fromLocalFile(getSaveDirectory()));
     });
 
-    splitter->addWidget(settingsArea);
+    mainLayout->addWidget(settingsArea, 1);
 
-    // make splitter default to right-side compressed
-    splitter->setSizes({ 9, 1 });
-    splitter->setStretchFactor(0, 1);   // left side stretchable
-    splitter->setStretchFactor(1, 0);   // right side not stretchable
-
-    QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mainLayout->addWidget(splitter);
+    QVBoxLayout *outerLayout = new QVBoxLayout(this);
+    outerLayout->addWidget(mainFrame);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
 }
 
 void ScanWidget::setupDeviceMode(DeviceBase* device, QString name)
@@ -194,20 +183,11 @@ void ScanWidget::setupDeviceMode(DeviceBase* device, QString name)
 
     // disconnect device signals
     connectDeviceSignals(false);
-    // 释放之前的设备
-    if (m_device) {
-        m_device->closeDevice();
-        m_device = nullptr;
-    }
 
     // 设置新设备
     auto deviceType = device->getDeviceType();
     m_isScanner = device->getDeviceType() == DeviceBase::Scanner;
 
-    if (!device->openDevice(name)) {
-        qWarning() << "无法打开设备:" << name;
-        return;
-    }
     // clear all combo boxes
     m_modeCombo->clear();
     m_resolutionCombo->clear();
@@ -232,6 +212,8 @@ void ScanWidget::setupDeviceMode(DeviceBase* device, QString name)
     m_colorCombo->setCurrentIndex(m_imageSettings->colorMode);
     m_formatCombo->setCurrentIndex(m_imageSettings->format);
 
+    updateDeviceSettings();
+
     connectDeviceSignals(true);
 }
 
@@ -240,11 +222,23 @@ void ScanWidget::connectDeviceSignals(bool bind)
     if (!m_device) return;
 
     if (bind) {
+        connect(m_device, &DeviceBase::previewUpdated, this, &ScanWidget::onUpdatePreview);
         connect(m_device, &DeviceBase::imageCaptured, this, &ScanWidget::onScanFinished);
         connect(m_device, &ScannerDevice::errorOccurred, this, &ScanWidget::handleDeviceError);
+
+        connect(m_modeCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onScanModeChanged);
+        connect(m_resolutionCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onResolutionChanged);
+        connect(m_colorCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onColorModeChanged);
+        connect(m_formatCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onFormatChanged);
     } else {
+        disconnect(m_device, &DeviceBase::previewUpdated, this, &ScanWidget::onUpdatePreview);
         disconnect(m_device, &DeviceBase::imageCaptured, this, &ScanWidget::onScanFinished);
         disconnect(m_device, &ScannerDevice::errorOccurred, this, &ScanWidget::handleDeviceError);
+
+        disconnect(m_modeCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onScanModeChanged);
+        disconnect(m_resolutionCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onResolutionChanged);
+        disconnect(m_colorCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onColorModeChanged);
+        disconnect(m_formatCombo, &QComboBox::currentIndexChanged, this, &ScanWidget::onFormatChanged);
     }
 }
 
@@ -262,29 +256,41 @@ void ScanWidget::updateDeviceSettings()
 {
     // 更新分辨率选项
     m_resolutionCombo->clear();
+    QStringList resolutions;
+    int defaultIndex = 0;
+
     if (m_isScanner) {
         auto scanner = dynamic_cast<ScannerDevice*>(m_device);
         if (scanner) {
-            auto resolutions = scanner->getSupportedResolutions();
-            for (const auto &res : resolutions) {
-                m_resolutionCombo->addItem(QString("%1 DPI").arg(res));
+            auto dpis = scanner->getSupportedResolutions();
+            auto currentDpi = scanner->getResolution();
+            for (const auto &res : dpis) {
+                resolutions << QString("%1 DPI").arg(res);
+                if (res == currentDpi) {
+                    defaultIndex = resolutions.size() - 1;
+                }
             }
         }
     } else {
         auto webcam = dynamic_cast<WebcamDevice*>(m_device);
         if (webcam) {
-            for (const auto &res : webcam->getSupportedResolutions()) {
-                m_resolutionCombo->addItem(QString("%1x%2").arg(res.width()).arg(res.height()));
+            auto resols = webcam->getSupportedResolutions();
+            auto currentRes = webcam->getResolution();
+            for (const auto &res : resols) {
+                resolutions << QString("%1x%2").arg(res.width()).arg(res.height());
+                if (res == currentRes) {
+                    defaultIndex = resolutions.size() - 1;
+                }
             }
         }
     }
+    m_resolutionCombo->addItems(resolutions);
+    m_resolutionCombo->setCurrentIndex(defaultIndex);
 }
 
 void ScanWidget::startCameraPreview()
 {
     if (!m_device) return;
-
-    updateDeviceSettings();
 
     if (m_isScanner) {
         QIcon icon = QIcon::fromTheme("blank_doc");
@@ -298,7 +304,6 @@ void ScanWidget::startCameraPreview()
             QTimer::singleShot(100, [webcam]() {
                 webcam->startPreview();
             });
-            m_previewTimer.start();
         } else {
             m_previewLabel->setText(tr("Device preview not available"));
         }
@@ -308,8 +313,6 @@ void ScanWidget::startCameraPreview()
 void ScanWidget::stopCameraPreview()
 {
     if (!m_device) return;
-
-    m_previewTimer.stop();
 
     if (m_isScanner) {
         auto scanner = dynamic_cast<ScannerDevice*>(m_device);
@@ -324,21 +327,7 @@ void ScanWidget::stopCameraPreview()
     }
 }
 
-void ScanWidget::updatePreview()
-{
-    if (!m_device || m_isScanner) return;
-
-    auto webcam = dynamic_cast<WebcamDevice*>(m_device);
-    if (webcam) {
-        // 获取最新帧并更新预览
-        QImage frame = webcam->getLatestFrame();
-        if (!frame.isNull()) {
-            setPreviewImage(frame);
-        }
-    }
-}
-
-void ScanWidget::setPreviewImage(const QImage &image)
+void ScanWidget::onUpdatePreview(const QImage &image)
 {
     if (image.isNull()) {
         m_previewLabel->setText(tr("No preview image"));
@@ -434,18 +423,9 @@ void ScanWidget::setSaveDirectory(const QString &dir)
 void ScanWidget::onScanFinished(const QImage &image)
 {
     QString scanDir = getSaveDirectory();
-    QString prefix = "scan";
-    if (m_device) {
-        QString deviceName = m_device->currentDeviceName();
-        // get the first part of the device name before the first space
-        // e.g. "Canon LiDE 300" -> "Canon"
-        int spacePos = deviceName.indexOf(' ');
-        prefix = spacePos > 0 ? deviceName.left(spacePos) : deviceName;
-    }
 
     // generate a file name with timestamp
-    QString fileName = QString("%1_%2.%3").arg(prefix)
-                               .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"))
+    QString fileName = QString("%1.%2").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"))
                                .arg(FORMATS[m_imageSettings->format].toLower());
 
     // handle color mode conversion

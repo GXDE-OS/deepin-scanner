@@ -7,21 +7,22 @@
 #include <QSharedPointer>
 #include <QHBoxLayout>
 #include <QListWidgetItem>
-#include <QGraphicsDropShadowEffect>
 
 #include <DLabel>
 #include <DFrame>
 #include <DIcon>
 #include <DPushButton>
 
-ScannersWidget::ScannersWidget(QWidget *parent) : QWidget(parent)
+ScannersWidget::ScannersWidget(QWidget *parent) : DWidget(parent)
 {
     setupUI();
 }
 
 void ScannersWidget::setupUI()
 {
-    mainLayout = new QVBoxLayout(this);
+    DFrame *mainFrame = new DFrame();
+    QVBoxLayout *mainLayout = new QVBoxLayout(mainFrame);
+    mainLayout->setContentsMargins(0, 10, 0, 10);
 
     // Title bar with refresh button
     QHBoxLayout *titleLayout = new QHBoxLayout();
@@ -31,20 +32,30 @@ void ScannersWidget::setupUI()
     font.setPointSize(font.pointSize() + 5);
     titleLabel->setFont(font);
 
-    refreshButton = new DIconButton();
+    DIconButton *refreshButton = new DIconButton();
     refreshButton->setIcon(QIcon::fromTheme("refresh"));
-    refreshButton->setIconSize(QSize(32, 32));
-    refreshButton->setFixedSize(36, 36);
+    refreshButton->setIconSize(QSize(40, 40));
+    refreshButton->setFixedSize(50, 50);
+    titleLayout->addSpacing(20);
     titleLayout->addWidget(titleLabel);
     titleLayout->addStretch();
     titleLayout->addWidget(refreshButton);
     titleLayout->addSpacing(20);
+
     mainLayout->addLayout(titleLayout);
 
     // Device list
-    deviceList = new QListWidget();
-    deviceList->setSpacing(10);
+    deviceList = new DListWidget();
+    deviceList->setSpacing(5);
+    deviceList->setSelectionMode(QAbstractItemView::NoSelection);
+    deviceList->setFrameShape(QFrame::NoFrame);
+    deviceList->setContentsMargins(0, 0, 0, 0);
+
     mainLayout->addWidget(deviceList);
+
+    QVBoxLayout *outerLayout = new QVBoxLayout(this);
+    outerLayout->addWidget(mainFrame);
+    outerLayout->setContentsMargins(10, 10, 10, 10);
 
     connect(refreshButton, &DIconButton::clicked, this, [this]() {
         emit updateDeviceListRequested();
@@ -84,11 +95,6 @@ void ScannersWidget::addDeviceItem(const QString &name, const QString &model,
     item->setData(Qt::UserRole + 1, isScanner);
 
     DFrame *itemWidget = new DFrame();
-    QGraphicsDropShadowEffect *shadow = new QGraphicsDropShadowEffect(itemWidget);
-    shadow->setBlurRadius(10);
-    shadow->setOffset(2, 2);
-    shadow->setColor(QColor(0, 0, 0, 50));
-    itemWidget->setGraphicsEffect(shadow);
     itemWidget->setBackgroundRole(QPalette::Window);
 
     QHBoxLayout *layout = new QHBoxLayout(itemWidget);
@@ -122,8 +128,8 @@ void ScannersWidget::addDeviceItem(const QString &name, const QString &model,
     DPushButton *scanButton = new DPushButton(tr("Scan"));
     scanButton->setProperty("deviceName", name);
     scanButton->setProperty("isScanner", isScanner);
-    scanButton->setFixedWidth(150);
-    scanButton->setFixedHeight(60);
+    scanButton->setFixedWidth(200);
+    scanButton->setFixedHeight(50);
     layout->addWidget(scanButton);
     layout->setContentsMargins(10, 10, 10, 10);
 
