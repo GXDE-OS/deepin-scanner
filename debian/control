@@ -6,6 +6,7 @@ Maintainer: deepin <packages@deepin.com>
 Build-Depends:
  debhelper (>= 11),
  pkg-config,
+ cmake,
  libqt5x11extras5-dev,
  qtbase5-dev,
  qttools5-dev-tools,

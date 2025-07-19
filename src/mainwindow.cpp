@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "mainwindow.h"
+#include "ddlog.h"
+
 #include <QSharedPointer>
 #include <QMessageBox>
 #include <QFileDialog>
@@ -19,21 +21,21 @@
 
 #include <DTitlebar>
 
+using namespace DDLog;
+
 MainWindow::MainWindow(QWidget *parent)
     : DMainWindow(parent)
 {
     // --- Initialize Devices ---
-    QSharedPointer<ScannerDevice> scannerDevice(new ScannerDevice(this));
-    QSharedPointer<WebcamDevice> webcamDevice(new WebcamDevice(this));
+    // Note: Don't pass 'this' as parent when using QSharedPointer to avoid double-deletion
+    QSharedPointer<ScannerDevice> scannerDevice(new ScannerDevice(nullptr));
+    scannerDevice->initialize();
+    QSharedPointer<WebcamDevice> webcamDevice(new WebcamDevice(nullptr));
+    webcamDevice->initialize();
 
     // Store devices in map
     m_devices["scanner"] = scannerDevice;
     m_devices["webcam"] = webcamDevice;
-
-    // Initialize SANE (Scanner)
-    if (!scannerDevice->initializeSane()) {
-        QMessageBox::critical(this, tr("Scanner error"), tr("Failed to initialize SANE backend.\nPlease ensure SANE libraries (e.g. sane-backends) are installed and you may need to configure permissions (e.g. add user to 'scanner' or 'saned' group).\nScanner functionality will be unavailable."));
-    }
 
     // --- 创建主界面 ---
     setWindowTitle(tr("Scanner Manager"));
@@ -91,12 +93,12 @@ MainWindow::~MainWindow()
 
 void MainWindow::updateDeviceList()
 {
-    qDebug() << "Updating device list...";
+    qDebug(app) << "Updating device list...";
     showLoading(tr("Loading devices..."));
 
     // 检查设备是否初始化
     if (!m_devices["scanner"] || !m_devices["webcam"]) {
-        qDebug() << "Error: Devices not initialized";
+        qDebug(app) << "Error: Devices not initialized";
         return;
     }
 
@@ -105,14 +107,30 @@ void MainWindow::updateDeviceList()
     auto webcam = qSharedPointerCast<WebcamDevice>(m_devices["webcam"]);
 
     if (scanner && webcam) {
-        // 更新ScannersWidget中的设备列表
-        m_scannersWidget->updateDeviceList(scanner, webcam);
+        // 给网络设备发现预留更多时间（特别是首次启动）
+        static bool firstRun = true;
+        int delay = firstRun ? 3000 : 500; // 首次启动等待3秒，后续等待0.5秒
+        
+        if (firstRun) {
+            qCInfo(app) << "First device list update, allowing extra time for network device discovery...";
+            firstRun = false;
+        }
+        
+        // 使用定时器延迟更新设备列表
+        QTimer::singleShot(delay, this, [this]() {
+            // 重新获取设备指针，避免捕获过期指针
+            auto scanner = qSharedPointerCast<ScannerDevice>(m_devices["scanner"]);
+            auto webcam = qSharedPointerCast<WebcamDevice>(m_devices["webcam"]);
+            
+            if (scanner && webcam) {
+                m_scannersWidget->updateDeviceList(scanner, webcam);
+            }
+            QTimer::singleShot(500, this, &MainWindow::hideLoading);
+        });
     } else {
-        qDebug() << "Error: Failed to cast device pointers";
+        qDebug(app) << "Error: Failed to cast device pointers";
+        QTimer::singleShot(500, this, &MainWindow::hideLoading);
     }
-
-
-    QTimer::singleShot(500, this, &MainWindow::hideLoading);
 }
 
 void MainWindow::showScanView(const QString &device, bool isScanner)
@@ -124,7 +142,7 @@ void MainWindow::showScanView(const QString &device, bool isScanner)
 
     // 设置当前设备指针
     auto devicePtr = isScanner ? m_devices["scanner"] : m_devices["webcam"];
-    qDebug() << "Current device: " << m_currentDevice;
+    qDebug(app) << "Current device: " << m_currentDevice;
     // open the device first via concurrent thread
     QFuture<bool> future = QtConcurrent::run([=]() {
         return devicePtr->openDevice(m_currentDevice);
@@ -139,7 +157,7 @@ void MainWindow::showScanView(const QString &device, bool isScanner)
     if (!watcher.result()) {
         QTimer::singleShot(500, this, &MainWindow::hideLoading);
         // TODO: show error message
-        qDebug() << "Failed to open device" << m_currentDevice;
+        qDebug(app) << "Failed to open device" << m_currentDevice;
         return;
     }
     m_scanWidget->setupDeviceMode(devicePtr.data(), m_currentDevice);
