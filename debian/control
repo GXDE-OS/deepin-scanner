@@ -7,14 +7,14 @@ Build-Depends:
  debhelper (>= 11),
  pkg-config,
  cmake,
- libqt5x11extras5-dev,
- qtbase5-dev,
- qttools5-dev-tools,
- qttools5-dev,
- libdtkwidget-dev,
- libdtkgui-dev,
- libdtkcore-dev,
- libquazip1-qt5-dev | libquazip5-dev,
+ qt6-5compat-dev,
+ qt6-base-dev,
+ qt6-tools-dev-tools,
+ qt6-tools-dev,
+ libdtk6widget-dev,
+ libdtk6gui-dev,
+ libdtk6core-dev,
+ libquazip1-qt6-dev,
  libsane-dev,
  libtiff-dev,
  libjpeg-dev,
@@ -28,5 +28,6 @@ Architecture: any
 Depends:
     ${shlibs:Depends},
     ${misc:Depends},
+Recommends: dde-qt6integration
 Description: a tool for scanning.
  Scanner Manager is a tool for scanning document files, supporting PDF, JPEG, PNG, TIFF.
