@@ -1,8 +1,9 @@
-deepin-scanner (0.1.15gxde1) UNRELEASED; urgency=medium
+deepin-scanner (0.1.15.1) UNRELEASED; urgency=medium
 
   * 使用 Qt6 进行构建
+  * 
 
- -- gfdgd_xi <3025613752@qq.com>  Fri, 29 Aug 2025 19:10:44 +0800
+ -- gfdgd_xi <3025613752@qq.com>  Fri, 29 Aug 2025 19:21:53 +0800
 
 deepin-scanner (0.1.15) unstable; urgency=medium
 
