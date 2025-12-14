@@ -1,9 +1,21 @@
-deepin-scanner (0.1.15.1) UNRELEASED; urgency=medium
+deepin-scanner (0.1.18) unstable; urgency=medium
 
-  * 使用 Qt6 进行构建
-  * 
+  * chore: Update compiler flags for security enhancements
 
- -- gfdgd_xi <3025613752@qq.com>  Fri, 29 Aug 2025 19:21:53 +0800
+ -- wangrong <wangrong@uniontech.com>  Tue, 02 Dec 2025 16:24:33 +0800
+
+deepin-scanner (0.1.17) unstable; urgency=medium
+
+  * chore: Update version to 0.1.17
+  * chore: Adjust pkg-config dependency
+
+ -- zhanghongyuan <zhanghongyuan@uniontech.com>  Fri, 17 Oct 2025 08:35:29 +0800
+
+deepin-scanner (0.1.16) unstable; urgency=medium
+
+  * chore: Update version to 0.1.16
+
+ -- zhanghongyuan <zhanghongyuan@uniontech.com>  Thu, 16 Oct 2025 19:25:00 +0800
 
 deepin-scanner (0.1.15) unstable; urgency=medium
 
