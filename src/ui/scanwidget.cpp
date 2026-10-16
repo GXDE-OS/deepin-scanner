@@ -20,6 +20,9 @@
 #include <QTransform>
 #include <QPainter>
 #include <QMap>
+#include <QFutureWatcher>
+#include <QElapsedTimer>
+#include <QtConcurrent>
 #include <qmath.h>
 #include <limits>
 
@@ -27,6 +30,7 @@
 #include <DPushButton>
 #include <DIconButton>
 #include <DLabel>
+#include <DMessageManager>
 
 using namespace DDLog;
 
@@ -55,7 +59,7 @@ void ScanWidget::setupUI()
 
     // Preview area
     DFrame *previewArea = new DFrame();
-    previewArea->setMinimumSize(480, 360);
+    previewArea->setMinimumSize(300, 200);
     QVBoxLayout *previewLayout = new QVBoxLayout(previewArea);
 
     m_previewLabel = new DLabel();
@@ -63,10 +67,24 @@ void ScanWidget::setupUI()
     m_previewLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     previewLayout->addWidget(m_previewLabel);
 
+    // Reconfiguring the camera takes about a second. A small spinner centered over the
+    // preview area shows that the app is working, instead of looking frozen on static text.
+    m_previewSpinner = new DSpinner(m_previewLabel);
+    m_previewSpinner->setFixedSize(20, 20);
+    m_previewSpinner->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_previewSpinner->setFocusPolicy(Qt::NoFocus);
+    m_previewSpinner->hide();
+
+    QVBoxLayout *spinnerLayout = new QVBoxLayout(m_previewLabel);
+    spinnerLayout->addStretch();
+    spinnerLayout->addWidget(m_previewSpinner, 0, Qt::AlignCenter);
+    spinnerLayout->addStretch();
+
     mainLayout->addWidget(previewArea, 9);
 
     // Settings area
     QWidget *settingsArea = new QWidget();
+    settingsArea->setMinimumWidth(276);
     QVBoxLayout *settingsLayout = new QVBoxLayout(settingsArea);
     settingsLayout->addSpacing(30);
 
@@ -324,6 +342,19 @@ void ScanWidget::startScanning()
         return;
     }
 
+    if (m_cameraBusy) {
+        // The camera is still being reconfigured, a capture now would race with it.
+        return;
+    }
+
+    if (auto *webcam = dynamic_cast<WebcamDevice *>(m_device)) {
+        if (webcam->isCapturing()) {
+            // The capture in flight is still waiting for its frame; a second one would only
+            // queue up behind it.
+            return;
+        }
+    }
+
     resetPreview();
     m_device->startCapture();
 }
@@ -376,8 +407,11 @@ void ScanWidget::startCameraPreview()
         auto webcam = dynamic_cast<WebcamDevice*>(m_device);
         if (webcam) {
             m_previewLabel->setText(tr("Initializing preview..."));
-            webcam->stopPreview();
-            QTimer::singleShot(100, [webcam]() {
+            // The stream is already open: openDevice() starts it on the thread that opens
+            // the camera, so stopping it here would only restart it for nothing. The camera
+            // is the context object, so a device that went away in the meantime is not
+            // started by a stale timer.
+            QTimer::singleShot(100, webcam, [webcam]() {
                 webcam->startPreview();
             });
         } else {
@@ -403,25 +437,38 @@ void ScanWidget::stopCameraPreview()
     }
 }
 
+void ScanWidget::waitForPendingCameraWork()
+{
+    if (m_resolutionWatcher) {
+        m_resolutionWatcher->waitForFinished();
+    }
+}
+
 void ScanWidget::onUpdatePreview(const QImage &image)
 {
+    if (m_previewSpinner->isVisible()) {
+        hidePreviewSpinner();   // the first frame of the new resolution is here
+    }
+
     if (image.isNull()) {
         m_previewLabel->setText(tr("No preview image"));
         return;
     }
 
     QMutexLocker locker(&m_previewMutex);
-    QPixmap pixmap = QPixmap::fromImage(image);
-    QPixmap scaled = pixmap.scaled(m_previewLabel->size(),
-                                   Qt::KeepAspectRatio,
-                                   Qt::SmoothTransformation);
-    m_previewLabel->setPixmap(scaled);
+    // Scale the image before converting it to a pixmap: converting a full camera frame
+    // (up to 8 MP) to a pixmap and scaling that is several times more expensive.
+    const QImage scaledImage = image.scaled(m_previewLabel->size(),
+                                           Qt::KeepAspectRatio,
+                                           Qt::FastTransformation);
+    m_previewLabel->setPixmap(QPixmap::fromImage(scaledImage));
     m_previewLabel->setAlignment(Qt::AlignCenter);
 }
 
 void ScanWidget::handleDeviceError(const QString &error)
 {
     qCWarning(app) << "Device error:" << error;
+    hidePreviewSpinner();
     m_previewLabel->setText(error);
 }
 
@@ -432,11 +479,18 @@ void ScanWidget::onDeviceOpened()
 }
 void ScanWidget::resetPreview()
 {
+    hidePreviewSpinner();
     QIcon icon = QIcon::fromTheme("blank_doc");
     QPixmap pixmap = icon.pixmap(200, 200);
     m_previewLabel->setPixmap(pixmap);
     // m_previewLabel->setText(tr("Click 'Scan' to begin"));
     m_previewLabel->setAlignment(Qt::AlignCenter);
+}
+
+void ScanWidget::hidePreviewSpinner()
+{
+    m_previewSpinner->stop();
+    m_previewSpinner->hide();
 }
 
 // 以下为参数变更处理函数
@@ -458,7 +512,40 @@ void ScanWidget::onResolutionChanged(int index)
             QString res = m_resolutionCombo->itemText(index);
             QStringList parts = res.split('x');
             if (parts.size() == 2) {
-                webcam->setResolution(parts[0].toInt(), parts[1].toInt());
+                if (m_cameraBusy || webcam->isCapturing()) {
+                    // The device is busy being reconfigured or read: a second reconfiguration
+                    // would close it underneath the first one.
+                    return;
+                }
+
+                // Reconfiguring the camera (close, re-open, set the format, map the buffers
+                // and start the stream) takes about a second, so it runs off the UI thread.
+                // The preview is stopped here, on this thread, and restarted when the new
+                // resolution is up.
+                m_cameraBusy = true;
+                m_previewSpinner->show();
+                m_previewSpinner->start();
+                webcam->stopPreview();
+
+                const int width = parts[0].toInt();
+                const int height = parts[1].toInt();
+                // The watcher belongs to this widget, not to the camera: the task keeps using
+                // the device from a worker thread, so it has to be waited for before the
+                // device is released (see waitForPendingCameraWork()).
+                auto *watcher = new QFutureWatcher<bool>(this);
+                m_resolutionWatcher = watcher;
+                connect(watcher, &QFutureWatcher<bool>::finished, this, [this, webcam, watcher]() {
+                    const bool changed = watcher->result();
+                    watcher->deleteLater();
+                    if (m_resolutionWatcher == watcher) {
+                        m_resolutionWatcher = nullptr;
+                    }
+                    m_cameraBusy = false;
+                    if (changed) {
+                        webcam->startPreview();
+                    }
+                });
+                watcher->setFuture(QtConcurrent::run(&WebcamDevice::setResolution, webcam, width, height));
             }
         }
     }
@@ -535,128 +622,163 @@ void ScanWidget::setSaveDirectory(const QString &dir)
 
 void ScanWidget::onScanFinished(const QImage &image)
 {
-    QString scanDir = getSaveDirectory();
-
-    // generate a file name with timestamp
-    QString fileName = QString("%1.%2").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"))
-                               .arg(FORMATS[m_imageSettings->format].toLower());
-
-    // handle color mode conversion
-    QImage processedImage = image;
-    // handle color mode conversion
-    if (m_imageSettings->colorMode == 1) {   // GRAYSCALE
-        processedImage = image.convertToFormat(QImage::Format_Grayscale8);
-    } else if (m_imageSettings->colorMode == 2) {   // BLACKWHITE
-        // 使用改进的黑白转换算法
-        processedImage = convertToBlackWhite(image);
-    }
-    
-    // Paper size handling
-    ScannerDevice::PaperSize targetPaperSize = static_cast<ScannerDevice::PaperSize>(m_imageSettings->paperSize);
-    
-    // Get current DPI for scaling
-    int currentDPI = 300;  // Default DPI
+    // Processing a full page (black and white conversion, paper size detection and scaling)
+    // and writing the file takes seconds, so it runs on a worker thread. The widget state is
+    // read here, because it belongs to the UI thread.
+    ScanSaveRequest request;
+    request.image = image;
+    // The path is claimed here, on the UI thread, before the save starts: two scans that end
+    // within the same second would otherwise build the same name and overwrite each other,
+    // as both saves run in parallel.
+    request.filePath = QDir(getSaveDirectory())
+                           .filePath(QString("%1.%2").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmsszzz"))
+                                         .arg(FORMATS[m_imageSettings->format].toLower()));
+    request.formatIndex = m_imageSettings->format;
+    request.colorMode = m_imageSettings->colorMode;
+    request.paperSize = static_cast<ScannerDevice::PaperSize>(m_imageSettings->paperSize);
     if (m_device && m_isScanner) {
         auto scanner = dynamic_cast<ScannerDevice*>(m_device);
         if (scanner) {
-            currentDPI = scanner->getResolution();
+            request.dpi = scanner->getResolution();
         }
     }
-    
+
+    auto *watcher = new QFutureWatcher<ScanSaveResult>(this);
+    connect(watcher, &QFutureWatcher<ScanSaveResult>::finished, this, [this, watcher]() {
+        const ScanSaveResult result = watcher->result();
+        watcher->deleteLater();
+
+        if (result.success) {
+            qCDebug(app) << "Scan saved to:" << result.filePath;
+            // add the saved file path to the top of the history box
+            m_historyEdit->moveCursor(QTextCursor::Start);
+            m_historyEdit->insertPlainText(result.filePath + "\n");
+            DMessageManager::instance()->sendMessage(window(), QIcon::fromTheme("dialog-ok"),
+                                                     tr("Scan completed, saved to: %1").arg(result.filePath));
+        } else {
+            qCWarning(app) << "Failed to save scan to:" << result.filePath;
+            DMessageManager::instance()->sendMessage(window(), QIcon::fromTheme("dialog-warning"),
+                                                     tr("Failed to save scan."));
+        }
+    });
+    watcher->setFuture(QtConcurrent::run(&ScanWidget::saveScan, request));
+}
+
+// Runs on a worker thread: it must not touch any widget state.
+ScanWidget::ScanSaveResult ScanWidget::saveScan(const ScanSaveRequest &request)
+{
+    ScanSaveResult result;
+    result.filePath = request.filePath;
+
+    QElapsedTimer saveTimer;
+    saveTimer.start();
+
+    QImage processedImage = request.image;
+    if (request.colorMode == 1) {   // GRAYSCALE
+        processedImage = processedImage.convertToFormat(QImage::Format_Grayscale8);
+    } else if (request.colorMode == 2) {   // BLACKWHITE
+        // 使用改进的黑白转换算法
+        processedImage = convertToBlackWhite(processedImage);
+    }
+
     // Handle paper size detection and scaling
-    if (targetPaperSize == ScannerDevice::PAPER_SIZE_AUTO) {
+    if (request.paperSize == ScannerDevice::PAPER_SIZE_AUTO) {
         // Auto-detect paper size
-        ScannerDevice::PaperSize detectedSize = detectPaperSize(processedImage);
+        const ScannerDevice::PaperSize detectedSize = detectPaperSize(processedImage, request.dpi);
         qDebug() << "Auto-detected paper size:" << detectedSize;
-        
+
         // Scale to detected size if needed
         if (detectedSize != ScannerDevice::PAPER_SIZE_AUTO) {
-            processedImage = scaleToPaperSize(processedImage, detectedSize, currentDPI);
+            processedImage = scaleToPaperSize(processedImage, detectedSize, request.dpi);
         }
     } else {
         // Use manually selected paper size
-        qDebug() << "Using selected paper size:" << targetPaperSize;
-        processedImage = scaleToPaperSize(processedImage, targetPaperSize, currentDPI);
+        qDebug() << "Using selected paper size:" << request.paperSize;
+        processedImage = scaleToPaperSize(processedImage, request.paperSize, request.dpi);
     }
 
-    QString filePath = QDir(scanDir).filePath(fileName);
-    bool saveSuccess = false;
+    const qint64 processMs = saveTimer.elapsed();
+    saveTimer.restart();
 
-    if (m_imageSettings->format < 4) {   // PNG/JPG/BMP/TIFF
-        saveSuccess = processedImage.save(filePath, FORMATS[m_imageSettings->format].toLatin1().constData());
-    } else if (m_imageSettings->format == 4) {   // PDF
-        QPrinter printer(QPrinter::HighResolution);
-        printer.setOutputFormat(QPrinter::PdfFormat);
-        printer.setOutputFileName(filePath);
-        
-        // Set page size based on selected paper size
-        QPageSize::PageSizeId pageSizeId = QPageSize::A4;  // Default
-        switch (targetPaperSize) {
-            case ScannerDevice::PAPER_SIZE_A3:
-                pageSizeId = QPageSize::A3;
-                break;
-            case ScannerDevice::PAPER_SIZE_A4:
-                pageSizeId = QPageSize::A4;
-                break;
-            case ScannerDevice::PAPER_SIZE_A5:
-                pageSizeId = QPageSize::A5;
-                break;
-            case ScannerDevice::PAPER_SIZE_A6:
-                pageSizeId = QPageSize::A6;
-                break;
-            case ScannerDevice::PAPER_SIZE_B4:
-                pageSizeId = QPageSize::B4;
-                break;
-            case ScannerDevice::PAPER_SIZE_B5:
-                pageSizeId = QPageSize::B5;
-                break;
-            case ScannerDevice::PAPER_SIZE_AUTO:
-            default:
-                // For auto mode, use the detected paper size or default to A4
-                // Note: The image has already been scaled to the correct size
-                pageSizeId = QPageSize::A4;
-                break;
-        }
-        printer.setPageSize(QPageSize(pageSizeId));
-        
-        QPainter painter;
-        if (painter.begin(&printer)) {
-            QRect rect = painter.viewport();
-            QSize size = processedImage.size();
-            size.scale(rect.size(), Qt::KeepAspectRatio);
-            painter.setViewport(rect.x(), rect.y(), size.width(), size.height());
-            painter.setWindow(processedImage.rect());
-            painter.drawImage(0, 0, processedImage);
-            painter.end();
-            saveSuccess = true;
-        }
+    if (request.formatIndex < 4) {   // PNG/JPG/BMP/TIFF
+        result.success = processedImage.save(result.filePath, FORMATS[request.formatIndex].toLatin1().constData());
+    } else if (request.formatIndex == 4) {   // PDF
+        result.success = renderPdf(processedImage, result.filePath, request.paperSize);
     } else {
         // Create vector of images
-        QVector<QImage> images;   
+        QVector<QImage> images;
         images.append(processedImage);
 
         // Write OFD file
         ofd::Writer writer;
-        
+
         // Get paper size dimensions in mm for OFD
-        QSizeF paperSizeMM = ScannerDevice::getPaperSizeDimensions(targetPaperSize);
-        
-        saveSuccess = writer.createFromImages(filePath, images, 0, 0, 
-                                              paperSizeMM.width(), paperSizeMM.height());
-        if (!saveSuccess) {
+        const QSizeF paperSizeMM = ScannerDevice::getPaperSizeDimensions(request.paperSize);
+
+        result.success = writer.createFromImages(result.filePath, images, 0, 0,
+                                                paperSizeMM.width(), paperSizeMM.height());
+        if (!result.success) {
             qCWarning(app) << "Failed to create OFD file";
         }
     }
 
-    if (saveSuccess) {
-        qCDebug(app) << "Scan saved to:" << filePath;
-        // add the saved file path to the top of the history box
-        m_historyEdit->moveCursor(QTextCursor::Start);
-        m_historyEdit->insertPlainText(filePath + "\n");
-    } else {
-        qCWarning(app) << "Failed to save scan to:" << filePath;
-    }
+    qCInfo(app) << "Scan save timing: process" << processMs << "ms, write" << saveTimer.elapsed() << "ms, format" << FORMATS[request.formatIndex];
+    return result;
 }
+
+// Runs on a worker thread: QPrinter is created and used there, which Qt allows for the
+// PDF output format (a QPrinter must be created in the thread that paints on it).
+bool ScanWidget::renderPdf(const QImage &image, const QString &filePath, ScannerDevice::PaperSize paperSize)
+{
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setOutputFormat(QPrinter::PdfFormat);
+    printer.setOutputFileName(filePath);
+
+    // Set page size based on selected paper size
+    QPageSize::PageSizeId pageSizeId = QPageSize::A4;  // Default
+    switch (paperSize) {
+        case ScannerDevice::PAPER_SIZE_A3:
+            pageSizeId = QPageSize::A3;
+            break;
+        case ScannerDevice::PAPER_SIZE_A4:
+            pageSizeId = QPageSize::A4;
+            break;
+        case ScannerDevice::PAPER_SIZE_A5:
+            pageSizeId = QPageSize::A5;
+            break;
+        case ScannerDevice::PAPER_SIZE_A6:
+            pageSizeId = QPageSize::A6;
+            break;
+        case ScannerDevice::PAPER_SIZE_B4:
+            pageSizeId = QPageSize::B4;
+            break;
+        case ScannerDevice::PAPER_SIZE_B5:
+            pageSizeId = QPageSize::B5;
+            break;
+        case ScannerDevice::PAPER_SIZE_AUTO:
+        default:
+            // For auto mode, use the detected paper size or default to A4
+            // Note: the image has already been scaled to the correct size
+            pageSizeId = QPageSize::A4;
+            break;
+    }
+    printer.setPageSize(QPageSize(pageSizeId));
+
+    QPainter painter;
+    if (!painter.begin(&printer)) {
+        return false;
+    }
+
+    QRect rect = painter.viewport();
+    QSize size = image.size();
+    size.scale(rect.size(), Qt::KeepAspectRatio);
+    painter.setViewport(rect.x(), rect.y(), size.width(), size.height());
+    painter.setWindow(image.rect());
+    painter.drawImage(0, 0, image);
+    painter.end();
+    return true;
+}
+
 
 void ScanWidget::onScanModeChanged(int index)
 {
@@ -874,24 +996,15 @@ QImage ScanWidget::convertToBlackWhite(const QImage &sourceImage)
     return finalResult;
 }
 
-ScannerDevice::PaperSize ScanWidget::detectPaperSize(const QImage &image)
+ScannerDevice::PaperSize ScanWidget::detectPaperSize(const QImage &image, int dpi)
 {
     if (image.isNull()) {
         return ScannerDevice::PAPER_SIZE_A4;  // Default to A4
     }
-    
-    // Get current DPI from scanner device
-    int currentDPI = 300;  // Default DPI
-    if (m_device && m_isScanner) {
-        auto scanner = dynamic_cast<ScannerDevice*>(m_device);
-        if (scanner) {
-            currentDPI = scanner->getResolution();
-        }
-    }
-    
+
     // Calculate physical dimensions in millimeters
-    double widthMM = (image.width() * 25.4) / currentDPI;
-    double heightMM = (image.height() * 25.4) / currentDPI;
+    double widthMM = (image.width() * 25.4) / dpi;
+    double heightMM = (image.height() * 25.4) / dpi;
     
     qDebug() << "Detected image size:" << widthMM << "x" << heightMM << "mm";
     
